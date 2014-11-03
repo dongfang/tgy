@@ -874,34 +874,43 @@ eeprom_defaults_w:
 
 .if MOTOR_BRAKE || LOW_BRAKE
 pwm_brake_on:
-		cpse	tcnt2h, ZH
-		rjmp	pwm_again
-		in	i_sreg, SREG
+		cpse	tcnt2h, ZH 		; simulated hi byte
+		rjmp	pwm_again		; Bail out if nonzero
+		in	i_sreg, SREG		; was zero. Save SREG
+
+						; So brake
 		nFET_brake i_temp1
 		ldi	i_temp1, 0xff
-		cp	off_duty_l, i_temp1	; Check for 0 off-time
+
+	;; For each entry, increment duty and decrement off_duty till off_duty reaches zero After that just skip the inc/dec thing.
+		cp	off_duty_l, i_temp1	; Check for 0 off-time (it's complemented. 0xff is zero)
 		cpc	off_duty_h, ZH
 		breq	pwm_brake_on1
-		ldi	ZL, pwm_brake_off	; Not full on, so turn it off next
+
+	
+		ldi	ZL, pwm_brake_off	; If not yet reached zero off-time, schedule a turnoff next time.
 		lds	i_temp2, brake_sub
 		sub	sys_control_l, i_temp2
 		brne	pwm_brake_on1
-		neg	duty_l			; Increase duty
-		sbc	duty_h, i_temp1		; i_temp1 is 0xff aka -1
-		com	duty_l
+	
+		neg	duty_l			; Increase duty (2's complement negation). Really the value is decremented but since it is the 1's complement of the duty cycle, the duty cycle is incremented.
+		sbc	duty_h, i_temp1		; i_temp1 is 0xff aka -1 with borrow. Borrow was set in all cases except zero so the subtraction will do nothing in all cases except zero (where it will add one to duty_h)
+		com	duty_l			; (1's complement. 2's complement followed by 1's complement is: com(com(n)+1). 0->0xff, 1->0, 2->1, 0xff->0xfe
 		com	off_duty_l		; Decrease off duty
 		sbc	off_duty_l, ZH
 		sbc	off_duty_h, ZH
 		com	off_duty_l
+
+	;; Load duty into TCNT2
 pwm_brake_on1:	mov	tcnt2h, duty_h
-		out	SREG, i_sreg
-		out	TCNT2, duty_l
+		out	SREG, i_sreg 		; restore SREG
+		out	TCNT2, duty_l		; timer 2 extended <- duty
 		reti
 
 pwm_brake_off:
 		cpse	tcnt2h, ZH
-		rjmp	pwm_again
-		in	i_sreg, SREG
+		rjmp	pwm_again 		; an exit
+		in	i_sreg, SREG		; if tcnt2h was zero
 		ldi	ZL, pwm_brake_on
 		mov	tcnt2h, off_duty_h
 		all_nFETs_off i_temp1
