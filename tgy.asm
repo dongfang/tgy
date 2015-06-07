@@ -198,8 +198,10 @@
 .equ	STOP_RC_PULS	= 1060	; Stop motor at or below this pulse length
 .equ	FULL_RC_PULS	= 1860	; Full speed at or above this pulse length
 .equ	MAX_RC_PULS	= 2400	; Throw away any pulses longer than this
-.equ	MIN_RC_PULS	= 100	; Throw away any pulses shorter than this
+.equ	MIN_RC_PULS	= 768	; Throw away any pulses shorter than this
 .equ	MID_RC_PULS	= (STOP_RC_PULS + FULL_RC_PULS) / 2	; Neutral when RC_PULS_REVERSE = 1
+.equ	RCP_ALIAS_SHIFT	= 3	; Enable 1/8th PWM input alias ("oneshot125")
+.equ	BEEP_RCP_ERROR	= 0	; Beep at stop if invalid PWM pulses were received
 
 .if	RC_PULS_REVERSE
 .equ	RCP_DEADBAND	= 50	; Do not start until this much above or below neutral
@@ -290,8 +292,8 @@
 .def	flags0		= r16	; state flags
 	.equ	OCT1_PENDING	= 0	; if set, output compare interrupt is pending
 	.equ	SET_DUTY	= 1	; if set when armed, set duty during evaluate_rc
-;	.equ	I_pFET_HIGH	= 2	; set if over-current detect
-;	.equ	GET_STATE	= 3	; set if state is to be send
+	.equ	RCP_ERROR	= 2	; if set, corrupted PWM input was seen
+	.equ	RCP_ALIAS	= 3	; if set, rc alias (shifted) range is active
 	.equ	EEPROM_RESET	= 4	; if set, reset EEPROM
 	.equ	EEPROM_WRITE	= 5	; if set, save settings to EEPROM
 	.equ	UART_SYNC	= 6	; if set, we are waiting for our serial throttle byte
@@ -354,6 +356,7 @@ com_time_x:	.byte	1
 start_delay:	.byte	1	; delay count after starting commutations before checking back-EMF
 start_modulate:	.byte	1	; Start modulation counter (to reduce heating from PWR_MAX_START if stuck)
 start_fail:	.byte   1	; Number of start_modulate loops for eventual failure and disarm
+rcp_beep_count:	.byte	1	; Number of RC pulse error beeps
 rc_duty_l:	.byte	1	; desired duty cycle
 rc_duty_h:	.byte	1
 fwd_scale_l:	.byte	1	; 16.16 multipliers to scale input RC pulse to POWER_RANGE
@@ -362,6 +365,14 @@ rev_scale_l:	.byte	1
 rev_scale_h:	.byte	1
 neutral_l:	.byte	1	; Offset for neutral throttle (in CPU_MHZ)
 neutral_h:	.byte	1
+.if RCP_DEADBAND && defined(RCP_ALIAS_SHIFT)
+deadband_l:	.byte	1	; Deadband scaled for possible input alias
+deadband_h:	.byte	1
+.endif
+.if LOW_BRAKE
+low_brake_l:	.byte	1	; Low brake position with deadband applied
+low_brake_h:	.byte	1
+.endif
 .if USE_I2C
 i2c_max_pwm:	.byte	1	; MaxPWM for MK (NOTE: 250 while stopped is magic and enables v2)
 i2c_rx_state:	.byte	1
