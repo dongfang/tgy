@@ -50,7 +50,7 @@
 ;
 ;-- Device ----------------------------------------------------------------
 ;
-.include "m8def.inc"
+; .include "m8def.inc"
 ;
 ; 8K Bytes of In-System Self-Programmable Flash
 ; 512 Bytes EEPROM
@@ -78,9 +78,12 @@
 ;
 ;-- Board -----------------------------------------------------------------
 ;
+#define yge80_esc
 ; The following only works with avra or avrasm2.
 ; For avrasm32, just comment out all but the include you need.
-#if defined(afro_esc)
+#if defined(yge80_esc)
+#include "YGE80.inc"		; AfroESC (ICP PWM, I2C, UART)
+#elif defined(afro_esc)
 #include "afro.inc"		; AfroESC (ICP PWM, I2C, UART)
 #elif defined(afro2_esc)
 #include "afro2.inc"		; AfroESC 2 (ICP PWM, I2C, UART)
@@ -146,10 +149,12 @@
 #error "Unrecognized board type."
 #endif
 
+;#include<M168def.inc>
+
 .equ	CPU_MHZ		= F_CPU / 1000000
 
-.equ	BOOT_LOADER	= 1	; Include Turnigy USB linker STK500v2 boot loader on PWM input pin
-.equ	BOOT_JUMP	= 1	; Jump to any boot loader when PWM input stays high
+.equ	BOOT_LOADER	= 0	; Include Turnigy USB linker STK500v2 boot loader on PWM input pin
+.equ	BOOT_JUMP	= 0	; Jump to any boot loader when PWM input stays high
 .equ	BOOT_START	= THIRDBOOTSTART
 
 .if !defined(COMP_PWM)
@@ -198,10 +203,8 @@
 .equ	STOP_RC_PULS	= 1060	; Stop motor at or below this pulse length
 .equ	FULL_RC_PULS	= 1860	; Full speed at or above this pulse length
 .equ	MAX_RC_PULS	= 2400	; Throw away any pulses longer than this
-.equ	MIN_RC_PULS	= 768	; Throw away any pulses shorter than this
+.equ	MIN_RC_PULS	= 100	; Throw away any pulses shorter than this
 .equ	MID_RC_PULS	= (STOP_RC_PULS + FULL_RC_PULS) / 2	; Neutral when RC_PULS_REVERSE = 1
-.equ	RCP_ALIAS_SHIFT	= 3	; Enable 1/8th PWM input alias ("oneshot125")
-.equ	BEEP_RCP_ERROR	= 0	; Beep at stop if invalid PWM pulses were received
 
 .if	RC_PULS_REVERSE
 .equ	RCP_DEADBAND	= 50	; Do not start until this much above or below neutral
@@ -292,8 +295,8 @@
 .def	flags0		= r16	; state flags
 	.equ	OCT1_PENDING	= 0	; if set, output compare interrupt is pending
 	.equ	SET_DUTY	= 1	; if set when armed, set duty during evaluate_rc
-	.equ	RCP_ERROR	= 2	; if set, corrupted PWM input was seen
-	.equ	RCP_ALIAS	= 3	; if set, rc alias (shifted) range is active
+;	.equ	I_pFET_HIGH	= 2	; set if over-current detect
+;	.equ	GET_STATE	= 3	; set if state is to be send
 	.equ	EEPROM_RESET	= 4	; if set, reset EEPROM
 	.equ	EEPROM_WRITE	= 5	; if set, save settings to EEPROM
 	.equ	UART_SYNC	= 6	; if set, we are waiting for our serial throttle byte
@@ -356,7 +359,6 @@ com_time_x:	.byte	1
 start_delay:	.byte	1	; delay count after starting commutations before checking back-EMF
 start_modulate:	.byte	1	; Start modulation counter (to reduce heating from PWR_MAX_START if stuck)
 start_fail:	.byte   1	; Number of start_modulate loops for eventual failure and disarm
-rcp_beep_count:	.byte	1	; Number of RC pulse error beeps
 rc_duty_l:	.byte	1	; desired duty cycle
 rc_duty_h:	.byte	1
 fwd_scale_l:	.byte	1	; 16.16 multipliers to scale input RC pulse to POWER_RANGE
@@ -365,14 +367,6 @@ rev_scale_l:	.byte	1
 rev_scale_h:	.byte	1
 neutral_l:	.byte	1	; Offset for neutral throttle (in CPU_MHZ)
 neutral_h:	.byte	1
-.if RCP_DEADBAND && defined(RCP_ALIAS_SHIFT)
-deadband_l:	.byte	1	; Deadband scaled for possible input alias
-deadband_h:	.byte	1
-.endif
-.if LOW_BRAKE
-low_brake_l:	.byte	1	; Low brake position with deadband applied
-low_brake_h:	.byte	1
-.endif
 .if USE_I2C
 i2c_max_pwm:	.byte	1	; MaxPWM for MK (NOTE: 250 while stopped is magic and enables v2)
 i2c_rx_state:	.byte	1
@@ -708,22 +702,22 @@ eeprom_defaults_w:
 
 .if USE_ICP
 .macro rcp_int_enable
-		in	@0, TIMSK
-		sbr	@0, (1<<TICIE1)	; enable icp1_int
-		out	TIMSK, @0
+		lds	@0, TIMSK1
+		sbr	@0, (1<<ICIE1)	; enable icp1_int
+		sts	TIMSK1, @0
 .endmacro
 .macro rcp_int_disable
-		in	@0, TIMSK
-		cbr	@0, (1<<TICIE1)	; disable icp1_int
-		out	TIMSK, @0
+		lds	@0, TIMSK1
+		cbr	@0, (1<<ICIE1)	; disable icp1_int
+		sts	(TIMSK1), @0
 .endmacro
 .macro rcp_int_rising_edge
 		ldi	@0, T1CLK
-		out	TCCR1B, @0
+		sts	TCCR1B, @0
 .endmacro
 .macro rcp_int_falling_edge
 		ldi	@0, T1CLK & ~(1<<ICES1)
-		out	TCCR1B, @0
+		sts	TCCR1B, @0
 .endmacro
 .elif USE_INT0
 .macro rcp_int_enable
@@ -760,11 +754,14 @@ eeprom_defaults_w:
 ; reading from the ADC at the same time.
 
 .macro comp_init
-		in	@0, SFIOR
+		lds	@0, ADCSRB
 		sbr	@0, (1<<ACME)	; set Analog Comparator Multiplexer Enable
-		out	SFIOR, @0
+		sts	ADCSRB, @0
 	.if defined(mux_a) && defined(mux_b) && defined(mux_c)
-		cbi	ADCSRA, ADEN	; Disable ADC to make sure ACME works
+		;cbi	ADCSRA, ADEN	; Disable ADC to make sure ACME works
+		lds @0, ADCSRA
+		andi @0, ~(1<<ADEN)
+		sts ADCSRA, @0
 	.endif
 .endmacro
 .macro comp_adc_disable
@@ -778,7 +775,7 @@ eeprom_defaults_w:
 .macro set_comp_phase_a
 	.if defined(mux_a)
 		ldi	@0, mux_a	; set comparator multiplexer to phase A
-		out	ADMUX, @0
+		sts	ADMUX, @0
 		comp_adc_disable
 	.else
 		comp_adc_enable
@@ -787,7 +784,7 @@ eeprom_defaults_w:
 .macro set_comp_phase_b
 	.if defined(mux_b)
 		ldi	@0, mux_b	; set comparator multiplexer to phase B
-		out	ADMUX, @0
+		sts	ADMUX, @0
 		comp_adc_disable
 	.else
 		comp_adc_enable
@@ -796,7 +793,7 @@ eeprom_defaults_w:
 .macro set_comp_phase_c
 	.if defined(mux_c)
 		ldi	@0, mux_c	; set comparator multiplexer to phase C
-		out	ADMUX, @0
+		sts	ADMUX, @0
 		comp_adc_disable
 	.else
 		comp_adc_enable
@@ -998,7 +995,7 @@ pwm_on_fast:
 		CnFET_on
 		ldi	ZL, pwm_off
 		mov	tcnt2h, duty_h
-		out	TCNT2, duty_l
+		sts	TCNT2, duty_l
 		reti
 
 pwm_wdr:					; Just reset watchdog
@@ -1019,7 +1016,7 @@ pwm_off:
 		BnFET_off			; but still equal on-time
 		sbrc	flags2, C_FET
 		CnFET_off
-		out	TCNT2, off_duty_l	; 1 cycle
+		sts	TCNT2, off_duty_l	; 1 cycle
 		.if COMP_PWM
 		sbrc	flags2, SKIP_CPWM	; 2 cycles if skip, 1 cycle otherwise
 		reti
@@ -1081,9 +1078,9 @@ t1ovfl_int2:	lds	i_temp1, rct_boot
 rcp_int:
 	.if USE_ICP || USE_INT0
 		.if USE_ICP
-		in	i_temp1, ICR1L		; get captured timer values
-		in	i_temp2, ICR1H
-		in	i_sreg, TCCR1B		; abuse i_sreg to hold value
+		lds	i_temp1, ICR1L		; get captured timer values
+		lds	i_temp2, ICR1H
+		lds	i_sreg, TCCR1B		; abuse i_sreg to hold value
 		sbrs	i_sreg, ICES1		; evaluate edge of this interrupt
 		.else
 		in	i_temp1, TCNT1L		; get timer1 values
@@ -1101,11 +1098,11 @@ rising_edge:
 		; We use this both to save the time it went high and
 		; to get an interrupt to indicate high timeout.
 		adiwx	i_temp1, i_temp2, MAX_RC_PULS * CPU_MHZ
-		out	OCR1BH, i_temp2
-		out	OCR1BL, i_temp1
+		sts	OCR1BH, i_temp2
+		sts	OCR1BL, i_temp1
 		rcp_int_falling_edge i_temp1	; Set next int to falling edge
 		ldi	i_temp1, (1<<OCF1B)	; Clear OCF1B flag
-		out	TIFR, i_temp1
+		out	TIFR1, i_temp1
 		out	SREG, i_sreg
 		reti
 
@@ -1115,13 +1112,13 @@ rcpint_fail:
 		rjmp	rcpint_exit
 
 falling_edge:
-		in	i_sreg, TIFR
+		in	i_sreg, TIFR1
 		sbrc	i_sreg, OCF1B		; Too long high would set OCF1B
 		rjmp	rcpint_fail
 		in	i_sreg, SREG
 		movw	rx_l, i_temp1		; Guaranteed to be valid, store immediately
-		in	i_temp1, OCR1BL		; No atomic temp register used to read OCR1* registers
-		in	i_temp2, OCR1BH
+		lds	i_temp1, OCR1BL		; No atomic temp register used to read OCR1* registers
+		lds	i_temp2, OCR1BH
 		sbi2	i_temp1, i_temp2, MAX_RC_PULS * CPU_MHZ	; Put back to start time
 		sub	rx_l, i_temp1		; Subtract start time from current time
 		sbc	rx_h, i_temp2
@@ -1254,7 +1251,7 @@ urxc_int:
 ; >= 200 is FULL_POWER.
 	.if USE_UART
 		in	i_sreg, SREG
-		in	i_temp1, UDR
+		lds	i_temp1, UDR0
 		cpi	i_temp1, 0xf5		; Start throttle byte sequence
 		breq	urxc_x3d_sync
 		sbrs	flags0, UART_SYNC
@@ -1343,9 +1340,9 @@ wait30ms:	ldi	temp2, 15
 wait1:		ldi	temp3, CPU_MHZ
 wait2:		out	TCNT0, ZH
 		ldi	temp1, (1<<TOV0)	; Clear TOV0 by setting it
-		out	TIFR, temp1
+		out	TIFR1, temp1
 		wdr
-wait3:		in	temp1, TIFR
+wait3:		in	temp1, TIFR1
 		sbrs	temp1, TOV0
 		rjmp	wait3
 		dec	temp3
@@ -1393,7 +1390,7 @@ eeprom_reset_block:
 eeprom_read_block:				; When interrupts disabled
 eeprom_write_block:				; When interrupts enabled
 		lds	temp1, orig_osccal
-		out	OSCCAL, temp1
+		sts	OSCCAL, temp1
 		cbr	flags0, (1<<EEPROM_WRITE)
 		ldi2	YL, YH, eeprom_sig_l
 		ldi2	temp1, temp2, EEPROM_OFFSET
@@ -1435,7 +1432,7 @@ osccal_set:
 .else
 		ldi	temp1, 0x9f		; Almost 8MHz
 .endif
-		out	OSCCAL, temp1
+		sts	OSCCAL, temp1
 		ret
 ;-----bko-----------------------------------------------------------------
 ; Shift left temp7:temp6:temp5 temp1 times.
@@ -1760,11 +1757,11 @@ init_debug_tx:
 	; Initialize TX for debugging on boards with free TX pin
 		.equ	D_BAUD_RATE = 38400
 		.equ	D_UBRR_VAL = F_CPU / D_BAUD_RATE / 16 - 1
-		outi	UBRRH, high(D_UBRR_VAL), temp1
-		outi	UBRRL, low(D_UBRR_VAL), temp1
+		outi	UBRR0H, high(D_UBRR_VAL), temp1
+		outi	UBRR0L, low(D_UBRR_VAL), temp1
 ;		sbi	UCSRA, U2X		; Double speed
-		sbi	UCSRB, TXEN
-		outi	UCSRC, (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0), temp1	; N81
+		sbi	UCSR0B, TXEN
+		outi	UCSR0C, (1<<UCSZ01)|(1<<UCSZ00), temp1	; N81
 		ret
 
 tx_hex_byte:
@@ -2147,10 +2144,10 @@ puls_find_fail:	ret
 ;-----bko-----------------------------------------------------------------
 update_timing:
 		cli
-		in	temp1, TCNT1L
-		in	temp2, TCNT1H
+		lds	temp1, TCNT1L
+		lds	temp2, TCNT1H
 		lds	temp3, tcnt1x
-		in	temp4, TIFR
+		in	temp4, TIFR1
 		sei
 		cpi	temp2, 0x80		; tcnt1x is right when TCNT1h[7] set;
 		sbrc	temp4, TOV1		; otherwise, if TOV1 is/was pending,
@@ -2417,21 +2414,21 @@ set_timing_degrees:
 ; interrupts may (have) come up. So, we must save tcnt1x and TIFR with
 ; interrupts disabled, then do a correction.
 set_ocr1a_abs:
-		in	temp4, TIMSK
+		lds	temp4, TIMSK1
 		mov	temp5, temp4
 		cbr	temp4, (1<<TOIE1)+(1<<OCIE1A)
-		out	TIMSK, temp4		; Disable TOIE1 and OCIE1A temporarily
+		sts	TIMSK1, temp4		; Disable TOIE1 and OCIE1A temporarily
 		ldi	temp4, (1<<OCF1A)
 		cli
-		out	OCR1AH, YH
-		out	OCR1AL, YL
-		out	TIFR, temp4		; Clear any pending OCF1A interrupt
-		in	temp1, TCNT1L
-		in	temp2, TCNT1H
+		sts	OCR1AH, YH
+		sts	OCR1AL, YL
+		out	TIFR1, temp4		; Clear any pending OCF1A interrupt
+		lds	temp1, TCNT1L
+		lds	temp2, TCNT1H
 		sei
 		sbr	flags0, (1<<OCT1_PENDING)
 		lds	temp3, tcnt1x
-		in	temp4, TIFR
+		in	temp4, TIFR1
 		cpi	temp2, 0x80		; tcnt1x is right when TCNT1h[7] set;
 		sbrc	temp4, TOV1		; otherwise, if TOV1 is/was pending,
 		adc	temp3, ZH		; increment our copy of tcnt1x.
@@ -2441,20 +2438,20 @@ set_ocr1a_abs:
 		sts	ocr1ax, temp7
 		brpl	set_ocr1a_abs1		; Skip set if time has passed
 		cbr	flags0, (1<<OCT1_PENDING)
-set_ocr1a_abs1:	out	TIMSK, temp5		; Enable TOIE1 and OCIE1A again
+set_ocr1a_abs1:	sts	TIMSK1, temp5		; Enable TOIE1 and OCIE1A again
 		ret
 ;-----bko-----------------------------------------------------------------
 ; Set OCT1_PENDING until the relative time specified by YL:YH:temp7 passes.
 set_ocr1a_rel:	adiw	YL, 7			; Compensate for timer increment during in-add-out
 		ldi	temp4, (1<<OCF1A)
 		cli
-		in	temp1, TCNT1L
-		in	temp2, TCNT1H
+		lds	temp1, TCNT1L
+		lds	temp2, TCNT1H
 		add	YL, temp1
 		adc	YH, temp2
-		out	OCR1AH, YH
-		out	OCR1AL, YL
-		out	TIFR, temp4		; Clear any pending OCF1A interrupt (7 cycles from TCNT1 read)
+		sts	OCR1AH, YH
+		sts	OCR1AL, YL
+		out	TIFR1, temp4		; Clear any pending OCF1A interrupt (7 cycles from TCNT1 read)
 		sts	ocr1ax, temp7
 		sbr	flags0, (1<<OCT1_PENDING)
 		sei
@@ -2467,9 +2464,9 @@ wait_OCT1_tot:	sbrc	flags1, EVAL_RC
 		ret
 ;-----bko-----------------------------------------------------------------
 switch_power_off:
-		out	TCCR2, ZH		; Disable PWM
+		sts	TCCR2A, ZH		; Disable PWM
 		ldi	temp1, (1<<TOV2)
-		out	TIFR, temp1		; Clear pending PWM interrupts
+		out	TIFR1, temp1		; Clear pending PWM interrupts
 		ldi	ZL, low(pwm_wdr)	; Stop PWM switching
 		all_pFETs_off temp1
 		all_nFETs_off temp1
@@ -2505,9 +2502,10 @@ boot_loader_jump:
 		out	DDRC, ZH
 		out	DDRD, ZH
 		outi	WDTCR, (1<<WDCE)+(1<<WDE), temp1
-		out	WDTCR, ZH		; Disable watchdog
+		//out	WDTCR, ZH		; Disable watchdog
+		sts	WDTCR, ZH		; Disable watchdog
 		lds	temp1, orig_osccal
-		out	OSCCAL, temp1		; Restore OSCCAL
+		sts	OSCCAL, temp1		; Restore OSCCAL
 		rjmp	BOOT_START		; Jump to boot loader
 .endif
 ;-----bko-----------------------------------------------------------------
@@ -2562,8 +2560,8 @@ control_disarm:
 
 	; Enable timer interrupts (we only do this late to improve beep quality)
 		ldi	temp1, (1<<TOIE1)+(1<<OCIE1A)+(1<<TOIE2)
-		out	TIFR, temp1		; Clear TOIE1, OCIE1A, and TOIE2 flags
-		out	TIMSK, temp1		; Enable t1ovfl_int, t1oca_int, t2ovfl_int
+		out	TIFR1, temp1		; Clear TOIE1, OCIE1A, and TOIE2 flags
+		sts	TIMSK1, temp1		; Enable t1ovfl_int, t1oca_int, t2ovfl_int
 
 		.if defined(HK_PROGRAM_CARD)
 	; This program card seems to send data at 1200 baud N81,
@@ -2572,23 +2570,35 @@ control_disarm:
 	; after any jumper change.
 		.equ	BAUD_RATE = 1200
 		.equ	UBRR_VAL = F_CPU / BAUD_RATE / 16 - 1
-		outi	UBRRH, high(UBRR_VAL), temp1
-		outi	UBRRL, low(UBRR_VAL), temp1
+		outi	UBRR0H, high(UBRR_VAL), temp1
+		outi	UBRR0L, low(UBRR_VAL), temp1
 		sbi	UCSRB, RXEN		; Do programming card rx by polling
-		outi	UCSRC, (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0), temp1	; N81
+		outi	UCSR0C, (1<<UCSZ01)|(1<<UCSZ00), temp1	; N81
 		.endif
 
 	; Initialize input sources (i2c and/or rc-puls)
 		.if USE_UART && !defined(HK_PROGRAM_CARD)
 		.equ	BAUD_RATE = 38400
 		.equ	UBRR_VAL = F_CPU / BAUD_RATE / 16 - 1
-		outi	UBRRH, high(UBRR_VAL), temp1
-		outi	UBRRL, low(UBRR_VAL), temp1
-		sbi	UCSRB, RXEN		; We don't actually tx
-		outi	UCSRC, (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0), temp1	; N81
-		in	temp1, UDR
-		sbi	UCSRA, RXC		; clear flag
-		sbi	UCSRB, RXCIE		; enable reception irq
+		outi	UBRR0H, high(UBRR_VAL), temp1
+		outi	UBRR0L, low(UBRR_VAL), temp1
+
+		;sbi	UCSR0B, RXEN0		; We don't actually tx
+		lds temp1, UCSR0B
+		ori temp1, (1<<RXEN0)
+		sts UCSR0B, temp1
+
+		outi	UCSR0C, (1<<UCSZ01)|(1<<UCSZ00), temp1	; N81
+		lds	temp1, UDR0
+		
+		; ??? Fucked it up.
+		sts	UCSR0A, RXC0		; clear flag
+		
+		;sbi	UCSR0B, RXCIE0		; enable reception irq
+		lds temp1, UCSR0B
+		ori temp1, (1<<RXCIE0)
+		sts UCSR0B, temp1
+
 		.endif
 		.if USE_I2C
 		rcall	i2c_init
@@ -2635,7 +2645,13 @@ i_rc_puls_rx:	rcall	evaluate_rc_init
 		.endif
 		.if USE_UART
 		sbrs	flags1, UART_MODE
-		cbi	UCSRB, RXEN		; Turn off receiver
+		
+		;cbi	UCSR0B, RXEN0		; Turn off receiver
+		
+		lds temp1, UCSR0B
+		andi temp1, ~(1<<RXEN0)
+		sts UCSR0B, temp1
+
 		.endif
 		.if USE_INT0 || USE_ICP
 		mov	temp1, flags1
@@ -2692,7 +2708,7 @@ set_brake_duty:	ldi2	temp1, temp2, MAX_POWER
 		ldi	ZL, low(pwm_brake_off)	; Enable PWM brake mode
 		clr	tcnt2h
 		clr	sys_control_l		; Abused as duty update divisor
-		outi	TCCR2, T2CLK, temp1	; Enable PWM, cleared later by switch_power_off
+		outi	TCCR2A, T2CLK, temp1	; Enable PWM, cleared later by switch_power_off
 		.endif
 
 wait_for_power_on:
@@ -2748,7 +2764,7 @@ start_from_running:
 		sts	powerskip, temp1	; see if motor is running, and align to it.
 		ldi	temp1, ENOUGH_GOODIES	; If we can follow without a timeout, do not
 		sts	goodies, temp1		; continue in startup mode (long ZC filtering).
-		outi	TCCR2, T2CLK, temp1	; Enable PWM (ZL has been set to pwm_wdr)
+		outi	TCCR2A, T2CLK, temp1	; Enable PWM (ZL has been set to pwm_wdr)
 
 ;-----bko-----------------------------------------------------------------
 ; *** commutation utilities ***
@@ -3264,16 +3280,18 @@ wait_startup1:	rcall	set_ocr1a_rel
 ; init after reset
 
 reset:		clr	r0
+		ldi r16, 1
 		out	SREG, r0		; Clear interrupts and flags
 
 	; Set up stack
 		ldi2	ZL, ZH, RAMEND
 		out	SPH, ZH
-		out	SPL, ZL
+		out	SPL, ZL  ; stack pointer
 	; Clear RAM and all registers
-clear_loop:	st	-Z, r0
-		cpi	ZL, SRAM_START
-		cpc	ZH, r0
+clear_loop:	st	-Z, r0  ;clear a byte
+		;cpi	ZL, SRAM_START
+		cpi	ZL, 0
+		cpc	ZH, r16
 		brne	clear_loop1
 		ldi	ZL, 30			; Start clearing registers
 clear_loop1:	cp	ZL, r0
@@ -3281,10 +3299,10 @@ clear_loop1:	cp	ZL, r0
 		brne	clear_loop		; Leaves with all registers (r0 through ZH) at 0
 
 	; Save original OSCCAL and reset cause
-		in	temp1, OSCCAL
+		lds	temp1, OSCCAL
 		sts	orig_osccal, temp1
-		in	temp7, MCUCSR		; Store reset reason in register not used for a while
-		out	MCUCSR, ZH
+		in	temp7, MCUSR		; Store reset reason in register not used for a while
+		out	MCUSR, ZH			; TODO: Is that here?
 
 	; Initialize ports
 		outi	PORTB, INIT_PB, temp1
@@ -3299,15 +3317,15 @@ clear_loop1:	cp	ZL, r0
 		.endif
 
 	; Start timers except output PWM
-		outi	TCCR0, T0CLK, temp1	; timer0: beep control, delays
+		outi	TCCR0A, T0CLK, temp1	; timer0: beep control, delays
 		outi	TCCR1B, T1CLK, temp1	; timer1: commutation timing, RC pulse measurement
-		out	TCCR2, ZH		; timer2: PWM, stopped
+		sts	TCCR2A, ZH		; timer2: PWM, stopped
 
 	; Enable watchdog (WDTON may be set or unset)
 		ldi	temp1, (1<<WDCE)+(1<<WDE)
-		out	WDTCR, temp1
+		sts	WDTCR, temp1
 		ldi	temp1, (1<<WDE)		; Fastest option: ~16.3ms timeout
-		out	WDTCR, temp1
+		sts	WDTCR, temp1
 
 	; Wait for power to settle -- this must be no longer than 64ms
 	; (with 64ms delayed start fuses) for i2c V2 protocol detection
